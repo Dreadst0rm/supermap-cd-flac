@@ -25,8 +25,7 @@ def write_flac(
 
     For PCM_24, integer samples are treated as signed 24-bit values in the low
     24 bits of int32 (as produced by gap_fill). libsndfile expects those bits
-    left-aligned in the int32 word, so we convert via float to avoid a silent
-    / near-silent file.
+    left-aligned in the int32 word, so we shift left by 8 before writing.
     """
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -35,8 +34,9 @@ def write_flac(
         arr = arr.reshape(-1, 1)
 
     if subtype == "PCM_24" and np.issubdtype(arr.dtype, np.integer):
-        # Normalize signed 24-bit magnitudes to float [-1, 1) for a correct write.
-        arr = np.clip(arr.astype(np.float64) / float(1 << 23), -1.0, 1.0 - 1.0 / (1 << 23))
+        # libsndfile expects signed 24-bit samples left-aligned in int32
+        # (gap_fill stores them in the low 24 bits).
+        arr = np.left_shift(np.asarray(arr, dtype=np.int32), 8)
 
     sf_level = max(0.0, min(1.0, float(compression_level) / 8.0))
     sf.write(

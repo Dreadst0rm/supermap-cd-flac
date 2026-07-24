@@ -107,6 +107,25 @@ def test_encode_flac_bitperfect_16(tmp_path):
     assert meta["DESCRIPTION"] == ["bit-perfect"]
 
 
+def test_encode_flac_pcm24_left_align_roundtrip(tmp_path):
+    from supermap_cd.encode import write_flac
+    import soundfile as sf
+
+    # Signed 24-bit magnitudes in the low 24 bits of int32 (gap_fill layout)
+    samples = np.array(
+        [-8388608, -1000, -1, 0, 1, 1000, 8388607],
+        dtype=np.int32,
+    )
+    stereo = np.column_stack([samples, samples])
+    path = tmp_path / "t24.flac"
+    write_flac(path, stereo, subtype="PCM_24")
+    data, sr = sf.read(str(path), dtype="int32", always_2d=True)
+    assert sr == 44100
+    # soundfile returns left-aligned int32; recover low-24 magnitudes
+    recovered = data >> 8
+    assert np.array_equal(recovered, stereo)
+
+
 def test_apply_ml_upscaler_numpy():
     x = int16_to_float(sbm_forward_quantize(_tone(2048), out_bits=16, rng=None, shaped=True))
     y = apply_ml_upscaler(x, prefer_torch=False)

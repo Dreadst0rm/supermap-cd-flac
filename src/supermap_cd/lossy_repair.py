@@ -35,6 +35,9 @@ STRENGTH_PARAMS = {
     "strong": (0.75, 1.00, 0.85, 0.22),
 }
 
+# Highpass residual blend (cached; designed once)
+_HP_RESID_BA = signal.butter(2, 5000 / (SAMPLE_RATE / 2), btype="high")
+
 
 def is_likely_lossy(path_suffix: str) -> bool:
     return path_suffix.lower() in LOSSY_SUFFIXES
@@ -72,22 +75,34 @@ def _suppress_codec_artifacts(
     strength: float,
 ) -> np.ndarray:
     """Soften unstable high-band bins typical of lossy coding."""
-    mag = np.abs(z)
-    phase = np.angle(z)
-    # Temporal median-ish smooth in HF (mean of neighbors in time)
     hf = freqs >= max(6000.0, cutoff_hz * 0.75)
     if not np.any(hf):
         return z
-    m = mag.copy()
-    # 3-tap temporal average on HF bins
-    left = np.roll(m, 1, axis=1)
-    right = np.roll(m, -1, axis=1)
-    avg = (left + m + right) / 3.0
-    # Also damp bins with extreme frame-to-frame jumps
-    jump = np.abs(m - avg) / (avg + 1e-9)
+    mag = np.abs(z)
+    phase = np.angle(z)
+    # Temporal smooth only on HF rows (avoid full-spectrogram rolls)
+    m_hf = mag[hf, :]
+    left = np.empty_like(m_hf)
+    right = np.empty_like(m_hf)
+    left[:, 0] = m_hf[:, -1]
+    left[:, 1:] = m_hf[:, :-1]
+    right[:, -1] = m_hf[:, 0]
+    right[:, :-1] = m_hf[:, 1:]
+    avg = (left + m_hf + right) / 3.0
+    jump = np.abs(m_hf - avg) / (avg + 1e-9)
     damp = 1.0 / (1.0 + strength * 2.5 * jump)
-    m[hf, :] = (1.0 - strength) * m[hf, :] + strength * avg[hf, :] * damp[hf, :]
-    return m * np.exp(1j * phase)
+    mag = mag.copy()
+    mag[hf, :] = (1.0 - strength) * m_hf + strength * avg * damp
+    return mag * np.exp(1j * phase)
+
+
+def _tile_rows(src: np.ndarray, n_dst: int) -> np.ndarray:
+    """Repeat rows of src to length n_dst without allocating a full np.tile buffer."""
+    src_len = src.shape[0]
+    if src_len == 0 or n_dst <= 0:
+        return np.empty((0, src.shape[1]), dtype=src.dtype)
+    rows = np.arange(n_dst) % src_len
+    return src[rows]
 
 
 def _bandwidth_extend(
@@ -101,7 +116,7 @@ def _bandwidth_extend(
     """Mirror mid/high band into missing HF with decaying envelope."""
     mag = np.abs(z)
     phase = np.angle(z)
-    n_freq, n_frames = mag.shape
+    n_freq, _n_frames = mag.shape
     # Source band just below cutoff
     src_hi = int(np.searchsorted(freqs, cutoff_hz))
     src_hi = int(np.clip(src_hi, 8, n_freq - 2))
@@ -117,10 +132,8 @@ def _bandwidth_extend(
     if n_dst <= 1:
         return z
 
-    # Mirror source repeatedly to fill destination length
     mirrored = np.flipud(src)
-    tiles = int(np.ceil(n_dst / mirrored.shape[0]))
-    fill = np.tile(mirrored, (tiles, 1))[:n_dst, :]
+    fill = _tile_rows(mirrored, n_dst)
 
     # Envelope decay toward Nyquist
     decay = np.linspace(1.0, max(0.05, 1.0 - hf_tilt), n_dst).reshape(-1, 1)
@@ -135,10 +148,8 @@ def _bandwidth_extend(
 
     # Phase: continue with randomized but stable HF phase from source mirror
     rng = np.random.default_rng(0xB10E)
-    src_phase = phase[src_lo:src_hi, :]
-    phase_fill = np.flipud(src_phase)
-    phase_tiles = int(np.ceil(n_dst / max(phase_fill.shape[0], 1)))
-    pfill = np.tile(phase_fill, (phase_tiles, 1))[:n_dst, :]
+    phase_fill = np.flipud(phase[src_lo:src_hi, :])
+    pfill = _tile_rows(phase_fill, n_dst)
     pfill = pfill + rng.uniform(-0.35, 0.35, size=pfill.shape)
     # Preserve existing phase where energy already existed
     use_exist = existing > (fill * 0.5)
@@ -200,7 +211,7 @@ def repair_channel(
     # Keep most of the original body; blend repaired HF/detail
     blend = 0.35 + 0.25 * {"light": 0, "medium": 1, "strong": 2}[strength]
     # Highpass residual so we don't smear the midrange
-    b, a = signal.butter(2, 5000 / (SAMPLE_RATE / 2), btype="high")
+    b, a = _HP_RESID_BA
     resid = signal.filtfilt(b, a, y - x)
     out = np.clip(x + blend * resid, -1.0, 1.0)
 
