@@ -1,4 +1,4 @@
-"""PySide6 Windows GUI: file upconverter + CD ripper."""
+"""PySide6 GUI: file upconverter + Windows CD ripper."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QAction, QDragEnterEvent, QDragMoveEvent, QDropEvent
@@ -37,7 +38,11 @@ from .io_audio import NATIVE_SUFFIXES, collect_audio_inputs
 from .mb import AlbumMeta, lookup_disc, placeholder_meta
 from .ml_upscaler import backend_name, ml_available
 from .pipeline import RipOptions, rip_and_encode_track, upconvert_file
-from .rip import DiscTOC, list_cd_drives, read_toc
+
+if TYPE_CHECKING:
+    from .rip import DiscTOC
+
+_HAS_CD_RIP = sys.platform == "win32"
 
 HONESTY = (
     "Super Bit Mapping is encode-only. SuperMap synthesizes +16 bits inside "
@@ -490,6 +495,8 @@ class CdRipTab(QWidget):
     failed = Signal(str)
 
     def __init__(self) -> None:
+        from .rip import DiscTOC
+
         super().__init__()
         self.toc: DiscTOC | None = None
         self.meta: AlbumMeta | None = None
@@ -531,6 +538,8 @@ class CdRipTab(QWidget):
         self.refresh_drives()
 
     def refresh_drives(self) -> None:
+        from .rip import list_cd_drives
+
         self.drive_combo.clear()
         drives = list_cd_drives()
         if not drives:
@@ -542,6 +551,8 @@ class CdRipTab(QWidget):
             self.read_btn.setEnabled(True)
 
     def read_disc(self) -> None:
+        from .rip import read_toc
+
         drive = self.drive_combo.currentText()
         if not drive or drive.startswith("("):
             return
@@ -617,9 +628,11 @@ class MainWindow(QMainWindow):
 
         self.tabs = QTabWidget()
         self.file_tab = FileConvertTab()
-        self.cd_tab = CdRipTab()
+        self.cd_tab: CdRipTab | None = None
         self.tabs.addTab(self.file_tab, "Convert files")
-        self.tabs.addTab(self.cd_tab, "Rip CD")
+        if _HAS_CD_RIP:
+            self.cd_tab = CdRipTab()
+            self.tabs.addTab(self.cd_tab, "Rip CD")
         layout.addWidget(self.tabs, stretch=2)
 
         self.progress = QProgressBar()
@@ -638,7 +651,10 @@ class MainWindow(QMainWindow):
         about_row.addWidget(about)
         layout.addLayout(about_row)
 
-        for tab in (self.file_tab, self.cd_tab):
+        wired = [self.file_tab]
+        if self.cd_tab is not None:
+            wired.append(self.cd_tab)
+        for tab in wired:
             tab.log.connect(self.append_log)
             tab.progress.connect(self.on_progress)
             tab.finished_ok.connect(self.on_done)
@@ -646,7 +662,10 @@ class MainWindow(QMainWindow):
             tab.busy_changed.connect(self._on_busy)
 
         self._make_menu()
-        self.statusBar().showMessage("Ready — drop files on Convert files, or rip a CD")
+        if _HAS_CD_RIP:
+            self.statusBar().showMessage("Ready — drop files on Convert files, or rip a CD")
+        else:
+            self.statusBar().showMessage("Ready — drop files on Convert files (CD rip is Windows-only)")
 
     def _make_menu(self) -> None:
         menu = self.menuBar().addMenu("&File")
@@ -698,12 +717,18 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Failed", err.splitlines()[0])
 
     def show_about(self) -> None:
+        rip_note = (
+            "<br><br>CD ripping is available on this Windows build."
+            if _HAS_CD_RIP
+            else "<br><br>CD ripping requires Windows (SPTI); this build is file convert only."
+        )
         QMessageBox.about(
             self,
             "About SuperMap Converter",
             f"<b>SuperMap Converter</b> v{__version__}<br><br>"
             "Load 16-bit / 44.1 audio (FLAC, WAV, Ogg, or via ffmpeg) and "
-            "convert with SBM-style expand to 20/24-bit FLAC.<br><br>"
+            "convert with SBM-style expand to 20/24-bit FLAC."
+            f"{rip_note}<br><br>"
             f"{HONESTY}",
         )
 

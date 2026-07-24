@@ -66,9 +66,9 @@ supermap-cd repair .\song.mp3 --bits 24 -o .\rips
 supermap-cd upconvert .\song.mp3 --repair-lossy --repair-strength strong --bits 24 -o .\rips
 ```
 
-## Windows GUI
+## GUI
 
-Double-click **`Launch SuperMap Converter.bat`**, or run:
+Double-click **`Launch SuperMap Converter.bat`** (dev install), run a frozen **SuperMap-Converter** build, or:
 
 ```powershell
 supermap-cd gui
@@ -76,9 +76,20 @@ supermap-cd gui
 supermap-cd-gui
 ```
 
-The **Convert files** tab lets you add / drag-and-drop FLAC, WAV, Ogg, MP3, AAC (or other audio), enable **Repair lossy**, set 20/24-bit output, and convert. The **Rip CD** tab is for optical drives.
+The **Convert files** tab lets you add / drag-and-drop FLAC, WAV, Ogg, MP3, AAC (or other audio), enable **Repair lossy**, set 20/24-bit output, and convert. The **Rip CD** tab is shown on **Windows only** (SPTI optical access).
 
 Each conversion writes a step-by-step `*.convert.log` next to the output FLAC (progress ends at **100%** once when the file is finished).
+
+## Frozen executables (Windows / Linux / macOS)
+
+There is no single binary for all OSes. Build **per platform** (onedir) with PyInstaller. Default freezes **exclude torch**; use `pip install -e ".[ml]"` for the ML backend in a normal Python install. **ffmpeg** is not bundled — install it separately if you need non-native formats.
+
+```powershell
+python -m pip install -e ".[packaging]"
+python packaging/build_executables.py
+```
+
+Artifacts land in `dist/supermap-cd/` (CLI) and `dist/SuperMap-Converter/` (GUI). CI builds all three OSes on version tags (`v*`) or via workflow dispatch (see `.github/workflows/build-executables.yml`).
 
 ## Tags
 

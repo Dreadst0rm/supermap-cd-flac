@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 ml = ["torch>=2.1"]
+packaging = ["pyinstaller>=6.3"]
 
 [project.scripts]
 supermap-cd = "supermap_cd.cli:main"
