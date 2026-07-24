@@ -82,7 +82,7 @@ Each conversion writes a step-by-step `*.convert.log` next to the output FLAC (p
 
 ## Frozen executables (Windows / Linux / macOS)
 
-There is no single binary for all OSes. Build **per platform** (onedir) with PyInstaller. Default freezes **exclude torch**; use `pip install -e ".[ml]"` for the ML backend in a normal Python install. **ffmpeg** is not bundled — install it separately if you need non-native formats.
+Stack: **PySide6** GUI + **PyInstaller onedir** freezes (one artifact per OS — there is no universal binary). Default freezes **exclude torch**; use `pip install -e ".[ml]"` for the ML backend in a normal Python install. **ffmpeg** is not bundled — install it separately if you need non-native formats.
 
 ```powershell
 python -m pip install -e ".[packaging]"
@@ -90,6 +90,8 @@ python packaging/build_executables.py
 ```
 
 Artifacts land in `dist/supermap-cd/` (CLI) and `dist/SuperMap-Converter/` (GUI). CI builds all three OSes on version tags (`v*`) or via workflow dispatch (see `.github/workflows/build-executables.yml`).
+
+For public downloads: **code-sign** the Windows binaries and **notarize** the macOS app (Gatekeeper) before release. Prefer onedir over onefile for Qt stability. Escalation only if needed — Briefcase (or Inno/WiX/create-dmg) for installers; Nuitka if AV false positives or cold-start become painful.
 
 ## Tags
 
