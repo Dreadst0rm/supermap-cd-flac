@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QAction, QDragEnterEvent, QDragMoveEvent, QDropEvent
@@ -59,6 +62,9 @@ AUDIO_SUFFIXES = NATIVE_SUFFIXES | {
     ".wv",
     ".ape",
 }
+
+# Bound parallelism for file conversion (not used for optical rip).
+_UPCONVERT_MAX_WORKERS = 4
 
 
 class RipWorker(QThread):
@@ -122,35 +128,77 @@ class UpconvertWorker(QThread):
     def run(self) -> None:
         try:
             total = len(self.paths)
-            for i, src in enumerate(self.paths, start=1):
-                self.log.emit(f"[{i}/{total}] Converting {src.name}...")
+            if total == 0:
+                self.finished_ok.emit()
+                return
 
-                def cb(msg: str, frac: float, _i=i, _src=src) -> None:
-                    overall = ((_i - 1) + max(0.0, min(1.0, frac))) / total
-                    self.progress.emit(f"{_src.name}: {msg}", overall)
+            # Warm Numba / optional torch once before fan-out
+            import numpy as np
 
-                result, paths = upconvert_file(
+            from .gapfill import gap_fill
+
+            gap_fill(np.zeros((64, 2), dtype=np.int16), output_bits=24, iterations=1)
+            if self.options.ml_upscaler:
+                from .ml_upscaler import make_prefer_fn
+
+                make_prefer_fn(use_torch=True)
+
+            workers = min(
+                _UPCONVERT_MAX_WORKERS,
+                total,
+                max(1, (os.cpu_count() or 2) // 2),
+            )
+            fracs = [0.0] * total
+            lock = Lock()
+
+            def on_progress(idx: int, src: Path, msg: str, frac: float) -> None:
+                with lock:
+                    fracs[idx] = max(0.0, min(1.0, frac))
+                    overall = sum(fracs) / total
+                self.progress.emit(f"{src.name}: {msg}", overall)
+
+            def convert_one(idx: int, src: Path):
+                self.log.emit(f"[{idx + 1}/{total}] Converting {src.name}...")
+
+                def cb(msg: str, frac: float, _idx=idx, _src=src) -> None:
+                    on_progress(_idx, _src, msg, frac)
+
+                result, out_paths = upconvert_file(
                     src,
                     self.options,
                     force_ffmpeg=self.force_ffmpeg,
                     progress=cb,
                 )
-                # Land on this file's share of overall progress once at completion
-                self.progress.emit(f"{src.name}: complete", i / total)
-                self.log.emit(
-                    f"  CRC32={result.crc32:08X} notes={';'.join(result.notes)}"
-                )
-                logged = set()
-                for p in paths:
-                    self.log.emit(f"  Wrote {p}")
-                    sibling = p.parent / f"{p.stem}.convert.log"
-                    # Main track log is without .16bit in the name
-                    main_log = p.parent / f"{p.stem.replace('.16bit', '')}.convert.log"
-                    for candidate in (sibling, main_log):
-                        key = str(candidate.resolve()) if candidate.is_file() else None
-                        if key and key not in logged:
-                            logged.add(key)
-                            self.log.emit(f"  Step log: {candidate}")
+                return idx, src, result, out_paths
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = [
+                    pool.submit(convert_one, i, src) for i, src in enumerate(self.paths)
+                ]
+                for fut in as_completed(futures):
+                    idx, src, result, out_paths = fut.result()
+                    with lock:
+                        fracs[idx] = 1.0
+                        overall = sum(fracs) / total
+                    self.progress.emit(f"{src.name}: complete", overall)
+                    self.log.emit(
+                        f"  [{idx + 1}/{total}] CRC32={result.crc32:08X} "
+                        f"notes={';'.join(result.notes)}"
+                    )
+                    logged: set[str] = set()
+                    for p in out_paths:
+                        self.log.emit(f"  Wrote {p}")
+                        sibling = p.parent / f"{p.stem}.convert.log"
+                        main_log = (
+                            p.parent / f"{p.stem.replace('.16bit', '')}.convert.log"
+                        )
+                        for candidate in (sibling, main_log):
+                            key = (
+                                str(candidate.resolve()) if candidate.is_file() else None
+                            )
+                            if key and key not in logged:
+                                logged.add(key)
+                                self.log.emit(f"  Step log: {candidate}")
             self.finished_ok.emit()
         except Exception as exc:
             self.failed.emit(f"{exc}\n{traceback.format_exc()}")

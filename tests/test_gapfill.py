@@ -131,3 +131,15 @@ def test_apply_ml_upscaler_numpy():
     y = apply_ml_upscaler(x, prefer_torch=False)
     assert y.shape == x.shape
     assert np.max(np.abs(y - x)) < 1.0 / 32768.0
+
+
+def test_apply_ml_upscaler_numpy_chunked_long():
+    # Longer than internal STFT chunk size — exercises overlap-add path
+    pcm = sbm_forward_quantize(_tone(80_000, freq=660.0), out_bits=16, rng=None, shaped=True)
+    x = int16_to_float(pcm)
+    y = apply_ml_upscaler(x, prefer_torch=False)
+    assert y.shape == x.shape
+    assert np.max(np.abs(y - x)) < 1.0 / 32768.0
+    prefer = make_prefer_fn(use_torch=False)
+    filled = expand_to_32bit_float(pcm, prefer_fn=prefer, iterations=4)
+    assert consistency_error(pcm, filled) <= 1
