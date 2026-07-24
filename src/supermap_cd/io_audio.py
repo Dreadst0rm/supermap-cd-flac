@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -99,14 +100,15 @@ def _normalize_pcm(data: np.ndarray) -> np.ndarray:
 def _load_soundfile(path: Path) -> tuple[np.ndarray, int, str]:
     import soundfile as sf
 
-    info = sf.info(str(path))
-    # Prefer exact int16 read for PCM containers.
-    subtype = (info.subtype or "").upper()
-    if "PCM_16" in subtype or subtype in {"PCM_S8", "PCM_U8"}:
-        data, sr = sf.read(str(path), dtype="int16", always_2d=True)
-    else:
-        data, sr = sf.read(str(path), dtype="float64", always_2d=True)
-    return _normalize_pcm(data), int(sr), f"soundfile:{info.format}/{info.subtype}"
+    with sf.SoundFile(str(path)) as f:
+        subtype = (f.subtype or "").upper()
+        fmt = f.format or "unknown"
+        if "PCM_16" in subtype or subtype in {"PCM_S8", "PCM_U8"}:
+            data = f.read(dtype="int16", always_2d=True)
+        else:
+            data = f.read(dtype="float64", always_2d=True)
+        sr = int(f.samplerate)
+    return _normalize_pcm(data), sr, f"soundfile:{fmt}/{subtype}"
 
 
 def _load_ffmpeg(path: Path) -> tuple[np.ndarray, int, str]:
@@ -132,14 +134,48 @@ def _load_ffmpeg(path: Path) -> tuple[np.ndarray, int, str]:
         str(SAMPLE_RATE),
         "pipe:1",
     ]
-    proc = subprocess.run(cmd, capture_output=True, check=False)
-    if proc.returncode != 0:
-        err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"ffmpeg failed for {path}: {err or proc.returncode}")
-    raw = proc.stdout
-    if len(raw) < 4 or len(raw) % 4:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+
+    # Drain stderr concurrently so a full pipe cannot deadlock stdout reads.
+    err_buf = bytearray()
+    err_cap = 65536
+
+    def _drain_stderr() -> None:
+        assert proc.stderr is not None
+        while True:
+            chunk = proc.stderr.read(4096)
+            if not chunk:
+                break
+            room = err_cap - len(err_buf)
+            if room > 0:
+                err_buf.extend(chunk[:room])
+
+    err_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    err_thread.start()
+
+    buf = bytearray()
+    read_size = 1 << 20  # 1 MiB
+    try:
+        while True:
+            chunk = proc.stdout.read(read_size)
+            if not chunk:
+                break
+            buf.extend(chunk)
+    finally:
+        err_thread.join(timeout=60)
+        ret = proc.wait()
+
+    if ret != 0:
+        err = err_buf.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"ffmpeg failed for {path}: {err or ret}")
+    if len(buf) < 4 or len(buf) % 4:
         raise RuntimeError(f"ffmpeg produced empty/odd PCM for {path}")
-    pcm = np.frombuffer(raw, dtype="<i2").reshape(-1, 2).copy()
+    pcm = np.frombuffer(buf, dtype="<i2").reshape(-1, 2).copy()
     return pcm, SAMPLE_RATE, "ffmpeg:s16le@44100"
 
 
@@ -222,32 +258,30 @@ def load_as_rip_result(
 def collect_audio_inputs(paths: list[Path], *, recursive: bool = False) -> list[Path]:
     """Expand files/dirs into a sorted list of audio paths."""
     found: list[Path] = []
-    audio_globs = (
-        "*.wav",
-        "*.flac",
-        "*.ogg",
-        "*.oga",
-        "*.mp3",
-        "*.m4a",
-        "*.aac",
-        "*.wma",
-        "*.aiff",
-        "*.aif",
-        "*.opus",
-        "*.wv",
-        "*.ape",
-    )
+    audio_suffixes = {
+        ".wav",
+        ".flac",
+        ".ogg",
+        ".oga",
+        ".mp3",
+        ".m4a",
+        ".aac",
+        ".wma",
+        ".aiff",
+        ".aif",
+        ".opus",
+        ".wv",
+        ".ape",
+    }
     for p in paths:
         p = Path(p)
         if p.is_file():
             found.append(p)
         elif p.is_dir():
-            if recursive:
-                for pattern in audio_globs:
-                    found.extend(p.rglob(pattern))
-            else:
-                for pattern in audio_globs:
-                    found.extend(p.glob(pattern))
+            iterator = p.rglob("*") if recursive else p.glob("*")
+            for candidate in iterator:
+                if candidate.is_file() and candidate.suffix.lower() in audio_suffixes:
+                    found.append(candidate)
         else:
             raise FileNotFoundError(p)
     # De-dupe preserving order

@@ -258,33 +258,72 @@ def sectors_to_pcm(raw: bytes) -> np.ndarray:
     return pcm.reshape(-1, 2).copy()
 
 
+def _pcm_as_uint32_words(pcm: np.ndarray) -> np.ndarray:
+    """Stereo int16 frames as little-endian uint32 words (C-contiguous)."""
+    data = np.ascontiguousarray(np.asarray(pcm, dtype=np.int16).reshape(-1))
+    if data.size % 2:
+        data = data[:-1]
+    return data.view(np.uint32)
+
+
 def accuraterip_crc_v1(pcm: np.ndarray) -> int:
     """AccurateRip v1 CRC (simplified; matches common AR algorithm on full track)."""
     # AR v1: sum of (sample_as_uint32 * index) over audio words, excluding
     # first/last 5 sectors worth for track 1 / last track in full implementation.
     # Here we compute over the whole rip; GUI/CLI reports it as "AR fingerprint".
-    data = np.asarray(pcm, dtype=np.int16).reshape(-1)
-    # Interpret stereo frames as little-endian uint32 sample pairs
-    if data.size % 2:
-        data = data[:-1]
-    words = data.view(np.uint32) if data.flags["C_CONTIGUOUS"] else np.ascontiguousarray(data).view(np.uint32)
+    words = _pcm_as_uint32_words(pcm).astype(np.uint64, copy=False)
     idxs = np.arange(1, words.size + 1, dtype=np.uint64)
-    total = int(np.sum(words.astype(np.uint64) * idxs) & 0xFFFFFFFF)
-    return total
+    # Per-term mod 2^32 then sum mod 2^32 (avoids uint64 sum overflow on long tracks)
+    terms = (words * idxs) & np.uint64(0xFFFFFFFF)
+    return int(np.sum(terms) & np.uint64(0xFFFFFFFF))
 
 
 def accuraterip_crc_v2(pcm: np.ndarray) -> int:
-    """AccurateRip v2-style CRC (accumulator with mul)."""
-    data = np.ascontiguousarray(np.asarray(pcm, dtype=np.int16).reshape(-1))
-    if data.size % 2:
-        data = data[:-1]
-    words = data.view(np.uint32)
-    crc = 0
-    mul = 1
-    for w in words:
-        crc = (crc + (int(w) * mul)) & 0xFFFFFFFF
-        mul = (mul + 1) & 0xFFFFFFFF
-    return crc
+    """AccurateRip v2-style CRC (accumulator with mul).
+
+    Equivalent to stepwise ``(crc + word * mul) & 0xFFFFFFFF`` with mul starting
+    at 1; vectorized via per-term products mod 2^32.
+    """
+    words = _pcm_as_uint32_words(pcm).astype(np.uint64, copy=False)
+    mul = np.arange(1, words.size + 1, dtype=np.uint64) & np.uint64(0xFFFFFFFF)
+    terms = (words * mul) & np.uint64(0xFFFFFFFF)
+    return int(np.sum(terms) & np.uint64(0xFFFFFFFF))
+
+
+def _majority_vote_bytes(buffers: list[bytearray] | list[bytes]) -> bytearray:
+    """Per-byte majority across rip passes.
+
+    Ties (including all-distinct bytes) prefer the earliest pass. Deterministic,
+    unlike ``max(set(...), key=count)`` whose tie-break follows set iteration order.
+    """
+    if not buffers:
+        return bytearray()
+    stack = np.stack(
+        [np.frombuffer(memoryview(b), dtype=np.uint8) for b in buffers],
+        axis=0,
+    )
+    n_pass = stack.shape[0]
+    if n_pass == 1:
+        return bytearray(stack[0])
+    if n_pass == 2:
+        return bytearray(stack[0])
+    if n_pass == 3:
+        a, b, c = stack[0], stack[1], stack[2]
+        out = np.where((a == b) | (a == c), a, np.where(b == c, b, a))
+        return bytearray(out)
+    # 4+: unanimous → pass 0; else vote only disagreeing positions
+    out = stack[0].copy()
+    disagree = np.flatnonzero(~np.all(stack == stack[0], axis=0))
+    for i in disagree:
+        col = stack[:, i].tolist()
+        counts: dict[int, int] = {}
+        first_idx: dict[int, int] = {}
+        for j, v in enumerate(col):
+            if v not in first_idx:
+                first_idx[v] = j
+            counts[v] = counts.get(v, 0) + 1
+        out[i] = max(counts.keys(), key=lambda v: (counts[v], -first_idx[v]))
+    return bytearray(out)
 
 
 def pcm_crc32(pcm: np.ndarray) -> int:
@@ -346,9 +385,7 @@ def rip_track(
             else:
                 # Majority byte vote per position
                 notes.append(f"pass mismatch vs pass 1 (using majority vote)")
-                stacked = list(zip(*buffers))
-                voted = bytearray(bytes(max(set(col), key=col.count) for col in stacked))
-                buffers[0] = voted
+                buffers[0] = _majority_vote_bytes(buffers)
                 verified = passes
                 break
 
