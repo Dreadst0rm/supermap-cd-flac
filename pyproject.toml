@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "supermap-cd"
+version = "0.4.0"
+description = "Secure CD ripper / file upconverter with lossy repair and SuperMap SBM expand to 20/24-bit FLAC"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "SuperMap CD" }]
+dependencies = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "soundfile>=0.12",
+  "mutagen>=1.47",
+  "musicbrainzngs>=0.7",
+  "PySide6>=6.6",
+  "numba>=0.59",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+ml = ["torch>=2.1"]
+
+[project.scripts]
+supermap-cd = "supermap_cd.cli:main"
+supermap-cd-gui = "supermap_cd.gui:run_gui_main"
+
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
