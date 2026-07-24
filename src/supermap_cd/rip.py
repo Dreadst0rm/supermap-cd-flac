@@ -5,12 +5,18 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import struct
+import sys
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
 import numpy as np
+
+
+def _require_windows_spti() -> None:
+    if sys.platform != "win32":
+        raise OSError("CD ripping via SPTI is only supported on Windows")
 
 # Windows CD-ROM SPTI constants
 IOCTL_CDROM_READ_TOC = 0x24000
@@ -73,10 +79,10 @@ ProgressCb = Callable[[str, float], None]
 
 def list_cd_drives() -> list[str]:
     """Return drive roots like 'D:\\' that look like CD-ROM drives."""
+    if sys.platform != "win32":
+        return []
     drives: list[str] = []
     try:
-        import ctypes
-
         GetDriveTypeW = ctypes.windll.kernel32.GetDriveTypeW
         DRIVE_CDROM = 5
         bitmask = ctypes.windll.kernel32.GetLogicalDrives()
@@ -92,6 +98,7 @@ def list_cd_drives() -> list[str]:
 
 
 def _kernel32():
+    _require_windows_spti()
     k = ctypes.windll.kernel32
     k.CreateFileW.restype = ctypes.c_void_p
     k.DeviceIoControl.argtypes = [

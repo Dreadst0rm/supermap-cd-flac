@@ -11,13 +11,25 @@ from .mb import lookup_disc, placeholder_meta
 from .pipeline import RipOptions, process_rip_result, rip_and_encode_track, upconvert_file
 from .rip import list_cd_drives, read_toc, rip_track_from_wav
 
+_WINDOWS_OPTICAL_ONLY = "only available on Windows (optical SPTI)"
+
 
 def _progress(msg: str, frac: float) -> None:
     pct = int(max(0.0, min(1.0, frac)) * 100)
     print(f"\r[{pct:3d}%] {msg}          ", end="", flush=True)
 
 
+def _require_windows_optical(command: str) -> bool:
+    """Return True if the command may proceed; print and return False otherwise."""
+    if sys.platform == "win32":
+        return True
+    print(f"Command '{command}' is {_WINDOWS_OPTICAL_ONLY}.", file=sys.stderr)
+    return False
+
+
 def cmd_drives(_: argparse.Namespace) -> int:
+    if not _require_windows_optical("drives"):
+        return 1
     drives = list_cd_drives()
     if not drives:
         print("No CD-ROM drives detected.")
@@ -28,6 +40,8 @@ def cmd_drives(_: argparse.Namespace) -> int:
 
 
 def cmd_toc(args: argparse.Namespace) -> int:
+    if not _require_windows_optical("toc"):
+        return 1
     toc = read_toc(args.drive)
     print(f"Drive: {toc.drive}")
     print(f"Lead-out LBA: {toc.leadout_lba}")
@@ -108,6 +122,9 @@ def cmd_rip(args: argparse.Namespace) -> int:
         for p in paths:
             print(f"Wrote {p}")
         return 0
+
+    if not _require_windows_optical("rip"):
+        return 1
 
     drive = args.drive or (list_cd_drives()[0] if list_cd_drives() else None)
     if not drive:

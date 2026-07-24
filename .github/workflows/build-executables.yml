@@ -1,0 +1,105 @@
+name: Build executables
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: windows
+          - os: macos-latest
+            artifact: macos
+          - os: ubuntu-latest
+            artifact: linux
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + packaging tools
+        run: python -m pip install -U pip && python -m pip install -e ".[packaging,dev]"
+
+      - name: Build frozen apps
+        run: python packaging/build_executables.py
+
+      - name: Smoke-test CLI --version
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./dist/supermap-cd/supermap-cd.exe --version
+          else
+            ./dist/supermap-cd/supermap-cd --version
+          fi
+
+      - name: Smoke-test CLI upconvert
+        shell: bash
+        run: |
+          python - <<'PY'
+          import wave, struct
+          from pathlib import Path
+          Path("smoke").mkdir(exist_ok=True)
+          path = Path("smoke/tone.wav")
+          rate, n = 44100, 4410
+          with wave.open(str(path), "w") as w:
+              w.setnchannels(2)
+              w.setsampwidth(2)
+              w.setframerate(rate)
+              frames = b"".join(struct.pack("<hh", 1000, -1000) for _ in range(n))
+              w.writeframes(frames)
+          print(path)
+          PY
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ./dist/supermap-cd/supermap-cd.exe upconvert smoke/tone.wav --no-expand -o smoke/out
+          else
+            ./dist/supermap-cd/supermap-cd upconvert smoke/tone.wav --no-expand -o smoke/out
+          fi
+          python -c "from pathlib import Path; files=list(Path('smoke/out').rglob('*.flac')); assert files, 'no flac written'; print(files[0])"
+
+      - name: Smoke-test GUI binary present / brief launch
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb libxkbcommon-x11-0 libxcb-cursor0
+            xvfb-run -a timeout 8 ./dist/SuperMap-Converter/SuperMap-Converter || true
+            test -x ./dist/SuperMap-Converter/SuperMap-Converter
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            test -x ./dist/SuperMap-Converter/SuperMap-Converter \
+              || test -d ./dist/SuperMap-Converter/SuperMap-Converter.app
+          else
+            test -f ./dist/SuperMap-Converter/SuperMap-Converter.exe
+          fi
+
+      - name: Pack artifact
+        shell: bash
+        run: |
+          cd dist
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -Command "Compress-Archive -Path supermap-cd,SuperMap-Converter -DestinationPath supermap-cd-${{ matrix.artifact }}.zip -Force"
+          else
+            zip -r "supermap-cd-${{ matrix.artifact }}.zip" supermap-cd SuperMap-Converter
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: supermap-cd-${{ matrix.artifact }}
+          path: dist/supermap-cd-${{ matrix.artifact }}.zip
+          if-no-files-found: error
